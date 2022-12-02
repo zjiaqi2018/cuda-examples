@@ -25,20 +25,21 @@ void print_stat(const std::string &method, const int size, const double flops, c
 
 // Declare a GPU-visible floating point variable in global memory.
 __device__ ValueType dResult;
-__device__ ValueType dResult_reduce_share;
-
 
 __global__ void reduceAtomicGlobal(const ValueType* input, int N)
 {
     const int id = threadIdx.x + blockIdx.x * blockDim.x;
+
     /* 
     Since all blocks must have the same number of threads,
     we may have to launch more threads than there are 
     inputs. Superfluous threads should not try to read 
     from the input (out of bounds access!)
     */
-    if (id < N)
-        atomicAdd(&dResult, input[id]*input[id]);
+    if (id < N){
+        const ValueType t = fabs(input[id]);
+        atomicAdd(&dResult, t*t);
+    }
 }
 
 
@@ -56,9 +57,9 @@ __global__ void reduceAtomicShared(const ValueType* input, int N)
     __shared__ ValueType x;
 
     // Only one thread should initialize this shared value
-    if (threadIdx.x == 0) 
+    if (threadIdx.x == 0) {
         x = 0.0;
-    
+    }
     /*
     Before we continue, we must ensure that all threads
     can see this update (initialization) by thread 0
@@ -69,8 +70,10 @@ __global__ void reduceAtomicShared(const ValueType* input, int N)
     Every thread in the block adds its input to the
     shared variable of the block.
     */
-    if (id < N) 
-        atomicAdd(&x, input[id] * input[id]);
+    if (id < N){
+        const ValueType t = fabs(input[id]);
+        atomicAdd(&x, t*t);
+    }
 
     // Wait until all threads have done their part
     __syncthreads();
@@ -112,7 +115,9 @@ __global__ void reduceShared(const ValueType* input, int N)
     the reduction, threads without an input simply
     produce a '0', which has no effect on the result.
     */
-    data[threadIdx.x] = (id < N ? input[id] * input[id] : 0);
+   
+    const ValueType t = fabs(input[id]);    
+    data[threadIdx.x] = (id < N ? t * t : 0);
 
     /*
     log N iterations to complete. In each step, a thread
@@ -139,7 +144,7 @@ __global__ void reduceShared(const ValueType* input, int N)
     after the last iteration.
     */
     if (threadIdx.x == 0)
-        atomicAdd(&dResult_reduce_share, data[0]);
+        atomicAdd(&dResult, data[0]);
 }
 
 // A very simple matrix class
@@ -302,13 +307,37 @@ const double flops = 3.0 * M * N;
     constexpr int block_size = 256;
     int grid_size = ((matrix_length + block_size) / block_size);
     double Gbytes = 1.0e-9 * double(sizeof(double) * (matrix_length));
-   
+
+    {
+        ValueType reduce_result = 0.;
+        
+        Timer<> clock;
+        clock.tick();        
+        for (int repeat = 0; repeat < nrepeat; repeat++)
+        {
+            cudaMemcpyToSymbol(dResult, &reduce_result, sizeof(ValueType));
+            reduceAtomicGlobal<<<grid_size, block_size>>>(d_mat, matrix_length);
+        }
+        cudaDeviceSynchronize();
+        clock.tock();
+        const double secs = clock.duration().count()/(nrepeat*1000.0);                
+
+        cudaMemcpyFromSymbol(&reduce_result, dResult, sizeof(ValueType));
+
+        const double flops = 3.0 * M * N;;
+        print_stat("ReduceAtomicGlobal", N, flops, secs, sqrt(reduce_result));
+        // printf("Reduce Frobenius norm = %lf\n", std::sqrt(reduce_result/(nrepeat*1.0)));
+        // printf("  N( %d ) M( %d ) nrepeat ( %d ) problem( %g MB ) time( %g s ) bandwidth( %g GB/s )\n", N, M, nrepeat, Gbytes * 1000, time, Gbytes * nrepeat / time);
+        
+    }
+
     {
         ValueType reduce_result = 0.;
         Timer<> clock;
         clock.tick();        
         for (int repeat = 0; repeat < nrepeat; repeat++)
         {
+            cudaMemcpyToSymbol(dResult, &reduce_result, sizeof(ValueType));
             reduceAtomicShared<<<grid_size, block_size>>>(d_mat, matrix_length);
             // reduceShared<block_size><<<grid_size, block_size>>>(d_mat, matrix_length);
         }
@@ -318,8 +347,8 @@ const double flops = 3.0 * M * N;
 
         cudaMemcpyFromSymbol(&reduce_result, dResult, sizeof(ValueType));
 
-        const double flops = 2*M * N;
-        print_stat("ReduceAtomicShared", N, flops, secs, sqrt(reduce_result/(nrepeat*1.0)));
+        const double flops = 3.0 * M * N;;
+        print_stat("ReduceAtomicShared", N, flops, secs, sqrt(reduce_result));
         // printf("Reduce Frobenius norm = %lf\n", std::sqrt(reduce_result/(nrepeat*1.0)));
         // printf("  N( %d ) M( %d ) nrepeat ( %d ) problem( %g MB ) time( %g s ) bandwidth( %g GB/s )\n", N, M, nrepeat, Gbytes * 1000, time, Gbytes * nrepeat / time);
         
@@ -331,7 +360,7 @@ const double flops = 3.0 * M * N;
         clock.tick();
         for (int repeat = 0; repeat < nrepeat; repeat++)
         {
-            // reduceAtomicGlobal<<<grid_size, block_size>>>(d_mat, matrix_length);
+            cudaMemcpyToSymbol(dResult, &reduce_result, sizeof(ValueType));
             reduceShared<block_size><<<grid_size, block_size>>>(d_mat, matrix_length);
         }
         cudaDeviceSynchronize();
@@ -340,10 +369,10 @@ const double flops = 3.0 * M * N;
 
         const double secs = clock.duration().count()/1000.0/nrepeat;
 
-        cudaMemcpyFromSymbol(&reduce_result, dResult_reduce_share, sizeof(ValueType));
+        cudaMemcpyFromSymbol(&reduce_result, dResult, sizeof(ValueType));
 
-        const double flops = 2*M * N;
-        print_stat("ActomicShare", N, flops, secs, sqrt(reduce_result/(nrepeat*1.0)));
+        const double flops =  3.0 * M * N;;
+        print_stat("ActomicShare", N, flops, secs, sqrt(reduce_result));
         // printf("Reduce Frobenius norm = %lf\n", std::sqrt(reduce_result/(nrepeat*1.0)));
         // printf("  N( %d ) M( %d ) nrepeat ( %d ) problem( %g MB ) time( %g s ) bandwidth( %g GB/s )\n", N, M, nrepeat, Gbytes * 1000, time, Gbytes * nrepeat / time);
         
@@ -367,7 +396,7 @@ int main(int argc, char *argv[])
     // for (int i=1;i<3;++i)
     {
         int size = N;
-        // test_host(size, nrepeat);
+        test_host(size, nrepeat);
     }
 
     {
