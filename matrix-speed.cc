@@ -9,6 +9,7 @@
 #include "timer.h"
 
 using ValueType = double;
+constexpr int block_size = 512;
 
 void
 print_stat(const std::string &method,
@@ -336,7 +337,6 @@ test_cuda(const int M, const int N, const int nrepeat)
              cudaMemcpyHostToDevice);
 
   // Executing kernel
-  constexpr int block_size = 256;
   int           grid_size  = ((matrix_length + block_size) / block_size);
   double        Gbytes     = 1.0e-9 * double(sizeof(double) * (matrix_length));
 
@@ -432,7 +432,7 @@ main(int argc, char *argv[])
 {
   const int N       = 10000;
   const int M       = N;
-  const int nrepeat = 100; // number of repeats of the test
+  const int nrepeat = 10; // number of repeats of the test
 
   // for (int i=1;i<3;++i)
   {
